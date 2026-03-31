@@ -155,30 +155,32 @@ local function connect()
   ws = WebSocket {
     url = url,
     deflate = false,
-    onreceive = function(message, data)
-      if message.type == WebSocketMessageType.OPEN then
+    minreconnectwait = 2,
+    maxreconnectwait = 5,
+    onreceive = function(mt, data, err)
+      if mt == WebSocketMessageType.OPEN then
         connected = true
         print("[MCP] Connected to MCP server")
-        -- Stop reconnect timer
         if reconnect_timer then
           reconnect_timer:stop()
           reconnect_timer = nil
         end
-      elseif message.type == WebSocketMessageType.TEXT then
+      elseif mt == WebSocketMessageType.TEXT then
         on_message(data)
-      elseif message.type == WebSocketMessageType.CLOSE then
+      elseif mt == WebSocketMessageType.CLOSE then
         connected = false
         print("[MCP] Disconnected from MCP server")
-        ws = nil
         start_reconnect()
-      elseif message.type == WebSocketMessageType.ERROR then
+      elseif mt == WebSocketMessageType.ERROR then
         connected = false
-        print("[MCP] WebSocket error")
-        ws = nil
+        print("[MCP] WebSocket error: " .. tostring(err))
         start_reconnect()
       end
     end
   }
+  -- Must explicitly call connect() to start the WebSocket connection
+  ws:connect()
+  print("[MCP] WebSocket connect() called")
 end
 
 ----------------------------------------------------------------------
