@@ -72,8 +72,13 @@ function M.put_pixels(params)
   if err then return err end
 
   local pixels = params.pixels
-  if not pixels or type(pixels) ~= "table" then
+  if not pixels then
     return base.error_invalid_params("Missing required parameter: pixels (array)")
+  end
+
+  local pixel_count = #pixels
+  if pixel_count == 0 then
+    return base.success({ pixels_set = 0 })
   end
 
   local cel, _, _, err2 = get_target_image(sprite, params)
@@ -85,8 +90,9 @@ function M.put_pixels(params)
   local ox, oy = cel.position.x, cel.position.y
 
   app.transaction("Put Pixels", function()
-    for _, p in ipairs(pixels) do
-      if p.x and p.y and p.color then
+    for i = 1, pixel_count do
+      local p = pixels[i]
+      if p and p.x and p.y and p.color then
         local color = color_util.from_hex(p.color)
         local pv = color_util.color_to_pixel(color, cm, palette)
         local lx = p.x - ox
@@ -390,7 +396,8 @@ function M.draw_brush_stroke(params)
 
   local color = color_util.from_hex(color_hex)
   local points = {}
-  for _, p in ipairs(points_data) do
+  for i = 1, #points_data do
+    local p = points_data[i]
     points[#points + 1] = Point(p.x, p.y)
   end
 

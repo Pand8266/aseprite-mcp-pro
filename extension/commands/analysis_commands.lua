@@ -6,6 +6,7 @@ function M.get_commands()
   return {
     get_color_stats = M.get_color_stats,
     compare_frames = M.compare_frames,
+    compare_screenshots = M.compare_screenshots,
     find_unused_colors = M.find_unused_colors,
     get_sprite_bounds = M.get_sprite_bounds,
     validate_animation = M.validate_animation,
@@ -115,6 +116,70 @@ function M.compare_frames(params)
     total_pixels = total,
     difference_percent = (diff_count / total) * 100,
     identical = diff_count == 0,
+  })
+end
+
+function M.compare_screenshots(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local fa, e1 = base.require_number(params, "frame_a")
+  if e1 then return e1 end
+  local fb, e2 = base.require_number(params, "frame_b")
+  if e2 then return e2 end
+
+  if fa < 1 or fa > #sprite.frames or fb < 1 or fb > #sprite.frames then
+    return base.error_invalid_params("Frame number out of range")
+  end
+
+  local img_a = Image(sprite.spec)
+  local img_b = Image(sprite.spec)
+  img_a:drawSprite(sprite, fa)
+  img_b:drawSprite(sprite, fb)
+
+  -- Create diff image: red=changed, green=only in A, blue=only in B
+  local diff_img = Image(sprite.width, sprite.height, ColorMode.RGB)
+  diff_img:clear()
+  local cm = sprite.colorMode
+  local palette = sprite.palettes[1]
+  local diff_count = 0
+
+  for y = 0, sprite.height - 1 do
+    for x = 0, sprite.width - 1 do
+      local pv_a = img_a:getPixel(x, y)
+      local pv_b = img_b:getPixel(x, y)
+      if pv_a ~= pv_b then
+        diff_count = diff_count + 1
+        local c_a = color_util.pixel_to_color(pv_a, cm, palette)
+        local c_b = color_util.pixel_to_color(pv_b, cm, palette)
+        if c_a.alpha == 0 then
+          diff_img:putPixel(x, y, app.pixelColor.rgba(0, 100, 255, 255))
+        elseif c_b.alpha == 0 then
+          diff_img:putPixel(x, y, app.pixelColor.rgba(0, 255, 100, 255))
+        else
+          diff_img:putPixel(x, y, app.pixelColor.rgba(255, 50, 50, 255))
+        end
+      end
+    end
+  end
+
+  -- Save diff as base64 PNG
+  local tmp = app.fs.tempPath .. app.fs.pathSeparator .. "mcp_diff.png"
+  diff_img:saveAs(tmp)
+  local f = io.open(tmp, "rb")
+  if not f then return base.error(-32603, "Failed to save diff image") end
+  local data = f:read("*a")
+  f:close()
+  os.remove(tmp)
+
+  local b64 = _G.MCP_BASE64
+  return base.success({
+    diff_image = b64.encode(data),
+    frame_a = fa,
+    frame_b = fb,
+    different_pixels = diff_count,
+    total_pixels = sprite.width * sprite.height,
+    difference_percent = (diff_count / (sprite.width * sprite.height)) * 100,
   })
 end
 

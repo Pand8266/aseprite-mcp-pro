@@ -14,6 +14,8 @@ function M.get_commands()
     set_fg_color = M.set_fg_color,
     set_bg_color = M.set_bg_color,
     generate_palette_from_sprite = M.generate_palette_from_sprite,
+    sort_palette = M.sort_palette,
+    import_palette_from_image = M.import_palette_from_image,
   }
 end
 
@@ -73,7 +75,8 @@ function M.set_palette(params)
   app.transaction("Set Palette", function()
     local palette = sprite.palettes[1]
     palette:resize(#colors)
-    for i, hex in ipairs(colors) do
+    for i = 1, #colors do
+      local hex = colors[i]
       palette:setColor(i - 1, color_util.from_hex(hex))
     end
   end)
@@ -218,6 +221,105 @@ function M.generate_palette_from_sprite(params)
     unique_colors = #sorted,
     palette_size = #new_colors,
   })
+end
+
+function M.sort_palette(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local sort_by = base.optional_string(params, "sort_by", "hue")
+  local reverse = base.optional_bool(params, "reverse", false)
+  local palette = sprite.palettes[1]
+
+  local colors = {}
+  for i = 0, #palette - 1 do
+    local c = palette:getColor(i)
+    colors[#colors + 1] = {
+      index = i,
+      color = c,
+      hex = color_util.to_hex(c),
+      h = c.hslHue,
+      s = c.hslSaturation,
+      l = c.hslLightness,
+    }
+  end
+
+  if sort_by == "hue" then
+    table.sort(colors, function(a, b) return a.h < b.h end)
+  elseif sort_by == "saturation" then
+    table.sort(colors, function(a, b) return a.s < b.s end)
+  elseif sort_by == "lightness" or sort_by == "brightness" then
+    table.sort(colors, function(a, b) return a.l < b.l end)
+  elseif sort_by == "red" then
+    table.sort(colors, function(a, b) return a.color.red < b.color.red end)
+  elseif sort_by == "green" then
+    table.sort(colors, function(a, b) return a.color.green < b.color.green end)
+  elseif sort_by == "blue" then
+    table.sort(colors, function(a, b) return a.color.blue < b.color.blue end)
+  end
+
+  if reverse then
+    local reversed = {}
+    for i = #colors, 1, -1 do reversed[#reversed + 1] = colors[i] end
+    colors = reversed
+  end
+
+  app.transaction("Sort Palette", function()
+    for i, entry in ipairs(colors) do
+      palette:setColor(i - 1, entry.color)
+    end
+  end)
+
+  return base.success({ size = #palette, sort_by = sort_by, reverse = reverse })
+end
+
+function M.import_palette_from_image(params)
+  local path, e1 = base.require_string(params, "path")
+  if e1 then return e1 end
+
+  local max_colors = base.optional_number(params, "max_colors", 256)
+
+  -- Load image and extract unique colors
+  local img = Image { fromFile = path }
+  if not img then
+    return base.error(-32603, "Failed to load image: " .. path)
+  end
+
+  local color_counts = {}
+  for y = 0, img.height - 1 do
+    for x = 0, img.width - 1 do
+      local pv = img:getPixel(x, y)
+      local r = app.pixelColor.rgbaR(pv)
+      local g = app.pixelColor.rgbaG(pv)
+      local b = app.pixelColor.rgbaB(pv)
+      local a = app.pixelColor.rgbaA(pv)
+      if a > 0 then
+        local hex = string.format("#%02X%02X%02X", r, g, b)
+        color_counts[hex] = (color_counts[hex] or 0) + 1
+      end
+    end
+  end
+
+  local sorted = {}
+  for hex, count in pairs(color_counts) do
+    sorted[#sorted + 1] = { hex = hex, count = count }
+  end
+  table.sort(sorted, function(a, b) return a.count > b.count end)
+
+  local sprite, _ = base.get_sprite()
+  if sprite then
+    local count = math.min(#sorted, max_colors)
+    app.transaction("Import Palette from Image", function()
+      local pal = sprite.palettes[1]
+      pal:resize(count)
+      for i = 1, count do
+        pal:setColor(i - 1, color_util.from_hex(sorted[i].hex))
+      end
+    end)
+    return base.success({ palette_size = count, source = path, unique_colors = #sorted })
+  else
+    return base.error_no_sprite()
+  end
 end
 
 return M

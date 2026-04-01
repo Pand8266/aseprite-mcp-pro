@@ -85,6 +85,8 @@ local function load_commands()
     "commands.export_commands",
     "commands.godot_commands",
     "commands.analysis_commands",
+    "commands.editor_commands",
+    "commands.template_commands",
   }
 
   for _, mod_name in ipairs(modules) do

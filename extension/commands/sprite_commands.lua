@@ -72,11 +72,14 @@ function M.save_sprite(params)
   local path = base.optional_string(params, "path", nil)
   if path then
     sprite:saveCopyAs(path)
+    return base.success({ filename = path, saved_as_copy = true })
+  elseif sprite.filename and sprite.filename ~= "" and sprite.filename ~= "Sprite" then
+    sprite:saveAs(sprite.filename)
+    return base.success({ filename = sprite.filename })
   else
-    app.command.SaveFile()
+    return base.error_invalid_params(
+      "Sprite has no filename. Please provide a 'path' parameter to save to.")
   end
-
-  return base.success({ filename = sprite.filename })
 end
 
 function M.close_sprite(params)
