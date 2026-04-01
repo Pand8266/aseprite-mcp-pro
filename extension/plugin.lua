@@ -3978,6 +3978,1007 @@ function template_cmds.create_tileset_template(params)
 end
 
 ----------------------------------------------------------------------
+-- Advanced Commands (interpolation, symmetry, ramps, preview, etc.)
+----------------------------------------------------------------------
+local advanced_cmds = {}
+
+-- Helper: RGB <-> HSL conversion
+local function rgb_to_hsl(r, g, b)
+  r, g, b = r / 255, g / 255, b / 255
+  local max_c = math.max(r, g, b)
+  local min_c = math.min(r, g, b)
+  local h, s, l = 0, 0, (max_c + min_c) / 2
+  if max_c ~= min_c then
+    local d = max_c - min_c
+    s = l > 0.5 and d / (2 - max_c - min_c) or d / (max_c + min_c)
+    if max_c == r then
+      h = (g - b) / d + (g < b and 6 or 0)
+    elseif max_c == g then
+      h = (b - r) / d + 2
+    else
+      h = (r - g) / d + 4
+    end
+    h = h / 6
+  end
+  return h * 360, s, l
+end
+
+local function hsl_to_rgb(h, s, l)
+  h = ((h % 360) + 360) % 360
+  h = h / 360
+  if s == 0 then
+    local v = math.floor(l * 255 + 0.5)
+    return v, v, v
+  end
+  local function hue2rgb(p, q, t)
+    if t < 0 then t = t + 1 end
+    if t > 1 then t = t - 1 end
+    if t < 1/6 then return p + (q - p) * 6 * t end
+    if t < 1/2 then return q end
+    if t < 2/3 then return p + (q - p) * (2/3 - t) * 6 end
+    return p
+  end
+  local q = l < 0.5 and l * (1 + s) or l + s - l * s
+  local p = 2 * l - q
+  local r = hue2rgb(p, q, h + 1/3)
+  local g2 = hue2rgb(p, q, h)
+  local b2 = hue2rgb(p, q, h - 1/3)
+  return math.floor(r * 255 + 0.5), math.floor(g2 * 255 + 0.5), math.floor(b2 * 255 + 0.5)
+end
+
+-- 1. interpolate_frames
+function advanced_cmds.interpolate_frames(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local from_frame, e1 = base.require_number(params, "from_frame")
+  if e1 then return e1 end
+  local to_frame, e2 = base.require_number(params, "to_frame")
+  if e2 then return e2 end
+  local steps = base.optional_number(params, "steps", 1)
+
+  if from_frame < 1 or to_frame > #sprite.frames or from_frame >= to_frame then
+    return base.error_invalid_params("Invalid frame range")
+  end
+  if steps < 1 then
+    return base.error_invalid_params("Steps must be >= 1")
+  end
+
+  local frames_added = 0
+
+  app.transaction("Interpolate Frames", function()
+    local pair_count = to_frame - from_frame
+    local insert_offset = 0
+
+    for pair = 0, pair_count - 1 do
+      local src_a_idx = from_frame + pair + insert_offset
+      local src_b_idx = src_a_idx + 1
+
+      for s = 1, steps do
+        local t = s / (steps + 1)
+        local new_frame_idx = src_a_idx + s
+        sprite:newEmptyFrame(new_frame_idx)
+        frames_added = frames_added + 1
+
+        for _, layer in ipairs(sprite.layers) do
+          if not layer.isGroup then
+            local cel_a = layer:cel(src_a_idx)
+            local cel_b = layer:cel(src_b_idx + steps)
+
+            if cel_a and cel_b then
+              local img_a = cel_a.image
+              local img_b = cel_b.image
+              local w = sprite.width
+              local h = sprite.height
+
+              local blended = Image(sprite.spec)
+              blended:clear()
+
+              local cm = sprite.colorMode
+              local palette = sprite.palettes[1]
+
+              for y = 0, h - 1 do
+                for x = 0, w - 1 do
+                  local lx_a = x - cel_a.position.x
+                  local ly_a = y - cel_a.position.y
+                  local lx_b = x - cel_b.position.x
+                  local ly_b = y - cel_b.position.y
+
+                  local ca, cb
+                  if lx_a >= 0 and ly_a >= 0 and lx_a < img_a.width and ly_a < img_a.height then
+                    ca = color_util.pixel_to_color(img_a:getPixel(lx_a, ly_a), cm, palette)
+                  else
+                    ca = Color(0, 0, 0, 0)
+                  end
+                  if lx_b >= 0 and ly_b >= 0 and lx_b < img_b.width and ly_b < img_b.height then
+                    cb = color_util.pixel_to_color(img_b:getPixel(lx_b, ly_b), cm, palette)
+                  else
+                    cb = Color(0, 0, 0, 0)
+                  end
+
+                  local r = math.floor(ca.red + (cb.red - ca.red) * t + 0.5)
+                  local g = math.floor(ca.green + (cb.green - ca.green) * t + 0.5)
+                  local b = math.floor(ca.blue + (cb.blue - ca.blue) * t + 0.5)
+                  local a = math.floor(ca.alpha + (cb.alpha - ca.alpha) * t + 0.5)
+
+                  if a > 0 then
+                    local mixed = Color(r, g, b, a)
+                    local pv = color_util.color_to_pixel(mixed, cm, palette)
+                    blended:putPixel(x, y, pv)
+                  end
+                end
+              end
+
+              sprite:newCel(layer, new_frame_idx, blended, Point(0, 0))
+            end
+          end
+        end
+      end
+
+      insert_offset = insert_offset + steps
+    end
+  end)
+
+  return base.success({
+    frames_added = frames_added,
+    total_frames = #sprite.frames,
+  })
+end
+
+-- 2. draw_symmetry
+function advanced_cmds.draw_symmetry(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local pixels = params.pixels
+  if not pixels or #pixels == 0 then
+    return base.error_invalid_params("Missing required parameter: pixels (array of {x,y,color})")
+  end
+
+  local mode = base.optional_string(params, "mode", "horizontal")
+  local layer = app.layer
+  local frame = app.frame
+
+  if not layer or layer.isGroup then
+    return base.error(-32000, "No valid active layer")
+  end
+
+  local cel = layer:cel(frame.frameNumber)
+  if not cel then
+    local img = Image(sprite.spec)
+    img:clear()
+    cel = sprite:newCel(layer, frame, img, Point(0, 0))
+  end
+
+  local w = sprite.width
+  local h = sprite.height
+  local axis_x = base.optional_number(params, "axis", nil)
+  local axis_y = base.optional_number(params, "axis", nil)
+  if not axis_x then axis_x = math.floor(w / 2) end
+  if not axis_y then axis_y = math.floor(h / 2) end
+
+  local cm = sprite.colorMode
+  local palette = sprite.palettes[1]
+  local img = cel.image
+  local ox, oy = cel.position.x, cel.position.y
+  local pixels_drawn = 0
+
+  local function put(x, y, pv)
+    local lx = x - ox
+    local ly = y - oy
+    if lx >= 0 and ly >= 0 and lx < img.width and ly < img.height then
+      img:putPixel(lx, ly, pv)
+      pixels_drawn = pixels_drawn + 1
+    end
+  end
+
+  app.transaction("Draw Symmetry", function()
+    for i = 1, #pixels do
+      local p = pixels[i]
+      if p and p.x and p.y and p.color then
+        local color = color_util.from_hex(p.color)
+        local pv = color_util.color_to_pixel(color, cm, palette)
+        local x, y = p.x, p.y
+
+        put(x, y, pv)
+
+        if mode == "horizontal" or mode == "both" then
+          local mx = 2 * axis_x - x - 1
+          put(mx, y, pv)
+        end
+        if mode == "vertical" or mode == "both" then
+          local my = 2 * axis_y - y - 1
+          put(x, my, pv)
+        end
+        if mode == "both" then
+          local mx = 2 * axis_x - x - 1
+          local my = 2 * axis_y - y - 1
+          put(mx, my, pv)
+        end
+      end
+    end
+  end)
+
+  return base.success({ pixels_drawn = pixels_drawn })
+end
+
+-- 3. generate_color_ramp
+function advanced_cmds.generate_color_ramp(params)
+  local base_hex, e1 = base.require_string(params, "base_color")
+  if e1 then return e1 end
+
+  local steps = base.optional_number(params, "steps", 5)
+  local hue_shift = base.optional_number(params, "hue_shift", 0)
+  local set_pal = base.optional_bool(params, "set_palette", false)
+
+  local bc = color_util.from_hex(base_hex)
+  local bh, bs_val, bl = rgb_to_hsl(bc.red, bc.green, bc.blue)
+
+  local colors = {}
+  local total = steps * 2 + 1
+
+  for i = 0, total - 1 do
+    local frac = i / (total - 1)
+    local l_val, h_val
+
+    if frac < 0.5 then
+      -- shadow side: darker, shift hue toward blue/purple
+      local shadow_t = frac / 0.5
+      l_val = bl * shadow_t * 0.5 + bl * 0.1 * (1 - shadow_t)
+      h_val = bh + hue_shift * (1 - shadow_t) * (-1)
+    elseif frac > 0.5 then
+      -- highlight side: brighter, shift hue toward yellow
+      local hi_t = (frac - 0.5) / 0.5
+      l_val = bl + (1 - bl) * hi_t * 0.85
+      h_val = bh + hue_shift * hi_t
+    else
+      l_val = bl
+      h_val = bh
+    end
+
+    local r, g, b = hsl_to_rgb(h_val, bs_val, math.max(0, math.min(1, l_val)))
+    local hex = string.format("#%02X%02X%02X", r, g, b)
+    colors[#colors + 1] = hex
+  end
+
+  if set_pal then
+    local sprite = app.sprite
+    if sprite then
+      app.transaction("Set Color Ramp Palette", function()
+        local pal = sprite.palettes[1]
+        pal:resize(#colors)
+        for i = 1, #colors do
+          pal:setColor(i - 1, color_util.from_hex(colors[i]))
+        end
+      end)
+    end
+  end
+
+  return base.success({
+    colors = colors,
+    count = #colors,
+  })
+end
+
+-- 4. get_animation_preview
+function advanced_cmds.get_animation_preview(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local scale = base.optional_number(params, "scale", 1)
+  local max_frames = base.optional_number(params, "max_frames", 30)
+
+  local frame_count = math.min(#sprite.frames, max_frames)
+  local fw = sprite.width
+  local fh = sprite.height
+  local scaled_w = math.floor(fw * scale)
+  local scaled_h = math.floor(fh * scale)
+  local strip_w = scaled_w * frame_count
+
+  local strip = Image(strip_w, scaled_h, sprite.colorMode)
+  strip:clear()
+
+  for i = 1, frame_count do
+    local flat = Image(sprite.spec)
+    flat:drawSprite(sprite, i)
+
+    if scale ~= 1 then
+      flat:resize(scaled_w, scaled_h)
+    end
+
+    for y = 0, scaled_h - 1 do
+      for x = 0, scaled_w - 1 do
+        local pv = flat:getPixel(x, y)
+        strip:putPixel((i - 1) * scaled_w + x, y, pv)
+      end
+    end
+  end
+
+  local tmp = app.fs.tempPath .. app.fs.pathSeparator .. "mcp_anim_strip.png"
+  strip:saveAs(tmp)
+  local f = io.open(tmp, "rb")
+  if not f then
+    return base.error(-32603, "Failed to save animation strip")
+  end
+  local data = f:read("*a")
+  f:close()
+  os.remove(tmp)
+
+  local b64 = _G.MCP_BASE64
+
+  local frame_meta = {}
+  for i = 1, frame_count do
+    frame_meta[i] = {
+      index = i,
+      duration_ms = math.floor(sprite.frames[i].duration * 1000),
+    }
+  end
+
+  return base.success({
+    image = b64.encode(data),
+    frame_count = frame_count,
+    frame_width = scaled_w,
+    frame_height = scaled_h,
+    strip_width = strip_w,
+    frames = frame_meta,
+  })
+end
+
+-- 5. flip_sprite
+function advanced_cmds.flip_sprite(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local direction, e1 = base.require_string(params, "direction")
+  if e1 then return e1 end
+  local scope = base.optional_string(params, "scope", "sprite")
+
+  if direction ~= "horizontal" and direction ~= "vertical" then
+    return base.error_invalid_params("direction must be 'horizontal' or 'vertical'")
+  end
+
+  local function flip_image(img, dir)
+    local w, h = img.width, img.height
+    local clone = img:clone()
+    for y = 0, h - 1 do
+      for x = 0, w - 1 do
+        if dir == "horizontal" then
+          img:putPixel(x, y, clone:getPixel(w - 1 - x, y))
+        else
+          img:putPixel(x, y, clone:getPixel(x, h - 1 - y))
+        end
+      end
+    end
+  end
+
+  app.transaction("Flip " .. scope .. " " .. direction, function()
+    if scope == "cel" then
+      local cel = app.cel
+      if cel then
+        flip_image(cel.image, direction)
+      end
+    elseif scope == "frame" then
+      local frame_num = app.frame.frameNumber
+      for _, layer in ipairs(sprite.layers) do
+        if not layer.isGroup then
+          local cel = layer:cel(frame_num)
+          if cel then
+            flip_image(cel.image, direction)
+          end
+        end
+      end
+    else -- sprite
+      for _, layer in ipairs(sprite.layers) do
+        if not layer.isGroup then
+          for fi = 1, #sprite.frames do
+            local cel = layer:cel(fi)
+            if cel then
+              flip_image(cel.image, direction)
+            end
+          end
+        end
+      end
+    end
+  end)
+
+  return base.success({ direction = direction, scope = scope })
+end
+
+-- 6. rotate_sprite
+function advanced_cmds.rotate_sprite(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local angle, e1 = base.require_number(params, "angle")
+  if e1 then return e1 end
+
+  if angle ~= 90 and angle ~= 180 and angle ~= 270 then
+    return base.error_invalid_params("angle must be 90, 180, or 270")
+  end
+
+  app.transaction("Rotate Sprite " .. angle, function()
+    local old_w = sprite.width
+    local old_h = sprite.height
+
+    if angle == 90 or angle == 270 then
+      sprite:resize(old_h, old_w)
+    end
+
+    for _, layer in ipairs(sprite.layers) do
+      if not layer.isGroup then
+        for fi = 1, #sprite.frames do
+          local cel = layer:cel(fi)
+          if cel then
+            local img = cel.image
+            local iw, ih = img.width, img.height
+            local clone = img:clone()
+            local new_w, new_h
+
+            if angle == 180 then
+              new_w, new_h = iw, ih
+            else
+              new_w, new_h = ih, iw
+            end
+
+            local new_img = Image(new_w, new_h, sprite.colorMode)
+            new_img:clear()
+
+            for y = 0, ih - 1 do
+              for x = 0, iw - 1 do
+                local pv = clone:getPixel(x, y)
+                if angle == 90 then
+                  new_img:putPixel(ih - 1 - y, x, pv)
+                elseif angle == 180 then
+                  new_img:putPixel(iw - 1 - x, ih - 1 - y, pv)
+                elseif angle == 270 then
+                  new_img:putPixel(y, iw - 1 - x, pv)
+                end
+              end
+            end
+
+            sprite:deleteCel(cel)
+            sprite:newCel(layer, fi, new_img, Point(0, 0))
+          end
+        end
+      end
+    end
+  end)
+
+  return base.success({
+    angle = angle,
+    new_width = sprite.width,
+    new_height = sprite.height,
+  })
+end
+
+-- 7. shift_cel
+function advanced_cmds.shift_cel(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local dx, e1 = base.require_number(params, "dx")
+  if e1 then return e1 end
+  local dy, e2 = base.require_number(params, "dy")
+  if e2 then return e2 end
+  local wrap = base.optional_bool(params, "wrap", false)
+
+  local layer, e3 = base.get_target_layer(sprite, params)
+  if e3 then return e3 end
+  local frame, e4 = base.get_target_frame(sprite, params)
+  if e4 then return e4 end
+
+  local cel = layer:cel(frame.frameNumber)
+  if not cel then
+    return base.error(-32000, "No cel at this layer/frame")
+  end
+
+  app.transaction("Shift Cel", function()
+    local img = cel.image
+    local w, h = img.width, img.height
+    local clone = img:clone()
+    img:clear()
+
+    for y = 0, h - 1 do
+      for x = 0, w - 1 do
+        local sx, sy
+        if wrap then
+          sx = ((x - dx) % w + w) % w
+          sy = ((y - dy) % h + h) % h
+        else
+          sx = x - dx
+          sy = y - dy
+        end
+        if sx >= 0 and sy >= 0 and sx < w and sy < h then
+          img:putPixel(x, y, clone:getPixel(sx, sy))
+        end
+      end
+    end
+  end)
+
+  return base.success({ dx = dx, dy = dy, wrap = wrap })
+end
+
+-- 8. apply_dither
+function advanced_cmds.apply_dither(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local color_a_hex, e1 = base.require_string(params, "color_a")
+  if e1 then return e1 end
+  local color_b_hex, e2 = base.require_string(params, "color_b")
+  if e2 then return e2 end
+  local pattern = base.optional_string(params, "pattern", "checker")
+  local x, e3 = base.require_number(params, "x")
+  if e3 then return e3 end
+  local y, e4 = base.require_number(params, "y")
+  if e4 then return e4 end
+  local w, e5 = base.require_number(params, "width")
+  if e5 then return e5 end
+  local h, e6 = base.require_number(params, "height")
+  if e6 then return e6 end
+
+  local cel, _, _, e7 = get_target_image(sprite, params)
+  if e7 then return e7 end
+
+  local ca = color_util.from_hex(color_a_hex)
+  local cb = color_util.from_hex(color_b_hex)
+  local cm = sprite.colorMode
+  local palette = sprite.palettes[1]
+  local pv_a = color_util.color_to_pixel(ca, cm, palette)
+  local pv_b = color_util.color_to_pixel(cb, cm, palette)
+
+  local img = cel.image
+  local ox, oy = cel.position.x, cel.position.y
+
+  -- Bayer matrices
+  local bayer2 = { {0, 2}, {3, 1} }
+  local bayer4 = {
+    { 0, 8, 2, 10},
+    {12, 4, 14, 6},
+    { 3, 11, 1, 9},
+    {15, 7, 13, 5},
+  }
+
+  app.transaction("Apply Dither", function()
+    for py = y, y + h - 1 do
+      for px = x, x + w - 1 do
+        local use_a = true
+
+        if pattern == "checker" then
+          use_a = ((px + py) % 2 == 0)
+        elseif pattern == "bayer2" then
+          local bx = px % 2
+          local by = py % 2
+          use_a = (bayer2[by + 1][bx + 1] < 2)
+        elseif pattern == "bayer4" then
+          local bx = px % 4
+          local by = py % 4
+          use_a = (bayer4[by + 1][bx + 1] < 8)
+        elseif pattern == "horizontal" then
+          use_a = (py % 2 == 0)
+        elseif pattern == "vertical" then
+          use_a = (px % 2 == 0)
+        end
+
+        local lx = px - ox
+        local ly = py - oy
+        if lx >= 0 and ly >= 0 and lx < img.width and ly < img.height then
+          img:putPixel(lx, ly, use_a and pv_a or pv_b)
+        end
+      end
+    end
+  end)
+
+  return base.success({
+    pattern = pattern,
+    area = { x = x, y = y, width = w, height = h },
+  })
+end
+
+-- 9. load_reference_image
+function advanced_cmds.load_reference_image(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local path, e1 = base.require_string(params, "path")
+  if e1 then return e1 end
+  local opacity = base.optional_number(params, "opacity", 128)
+  local name = base.optional_string(params, "name", "Reference")
+
+  local ref_img = Image { fromFile = path }
+  if not ref_img then
+    return base.error(-32603, "Failed to load image: " .. path)
+  end
+
+  local img_w = ref_img.width
+  local img_h = ref_img.height
+
+  app.transaction("Load Reference Image", function()
+    local ref_layer = sprite:newLayer()
+    ref_layer.name = name
+    ref_layer.opacity = opacity
+    ref_layer.isEditable = false
+    ref_layer.stackIndex = 1
+
+    sprite:newCel(ref_layer, 1, ref_img, Point(0, 0))
+  end)
+
+  return base.success({
+    layer_name = name,
+    image_width = img_w,
+    image_height = img_h,
+  })
+end
+
+-- 10. generate_animation_player_tres
+function advanced_cmds.generate_animation_player_tres(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local texture_path, e1 = base.require_string(params, "texture_path")
+  if e1 then return e1 end
+  local output_path, e2 = base.require_string(params, "output_path")
+  if e2 then return e2 end
+  local sheet_type = base.optional_string(params, "sheet_type", "horizontal")
+  local property_path = base.optional_string(params, "property_path", "frame")
+
+  local animations = {}
+  local frame_count = #sprite.frames
+
+  if #sprite.tags > 0 then
+    for _, tag in ipairs(sprite.tags) do
+      local anim = {
+        name = tag.name,
+        from = tag.fromFrame.frameNumber,
+        to = tag.toFrame.frameNumber,
+        loop = (tag.repeats == 0),
+      }
+      animations[#animations + 1] = anim
+    end
+  else
+    animations[1] = {
+      name = "default",
+      from = 1,
+      to = frame_count,
+      loop = true,
+    }
+  end
+
+  -- Build .tres content
+  local lines = {}
+  local anim_count = #animations
+  lines[#lines + 1] = string.format('[gd_resource type="AnimationLibrary" load_steps=%d format=3]', anim_count + 2)
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = string.format('[ext_resource type="Texture2D" path="%s" id="1"]', texture_path)
+  lines[#lines + 1] = ""
+
+  local anim_names = {}
+  for ai, anim in ipairs(animations) do
+    local res_id = tostring(ai + 1)
+    lines[#lines + 1] = string.format('[sub_resource type="Animation" id="%s"]', res_id)
+    lines[#lines + 1] = string.format('resource_name = "%s"', anim.name)
+
+    local anim_frames = anim.to - anim.from + 1
+    local total_dur = 0
+    for fi = anim.from, anim.to do
+      total_dur = total_dur + sprite.frames[fi].duration
+    end
+    lines[#lines + 1] = string.format('length = %.3f', total_dur)
+    if anim.loop then
+      lines[#lines + 1] = 'loop_mode = 1'
+    end
+
+    lines[#lines + 1] = 'tracks/0/type = "value"'
+    lines[#lines + 1] = string.format('tracks/0/path = NodePath(".:%s")', property_path)
+    lines[#lines + 1] = 'tracks/0/interp = 1'
+
+    local times = {}
+    local values = {}
+    local transitions = {}
+    local t = 0
+    for fi = anim.from, anim.to do
+      times[#times + 1] = string.format("%.3f", t)
+      values[#values + 1] = tostring(fi - 1)
+      transitions[#transitions + 1] = "1.0"
+      t = t + sprite.frames[fi].duration
+    end
+
+    lines[#lines + 1] = string.format('tracks/0/keys = {"times": PackedFloat32Array(%s), "transitions": PackedFloat32Array(%s), "update": 1, "values": [%s]}',
+      table.concat(times, ", "),
+      table.concat(transitions, ", "),
+      table.concat(values, ", "))
+    lines[#lines + 1] = ""
+
+    anim_names[#anim_names + 1] = anim.name
+  end
+
+  lines[#lines + 1] = '[resource]'
+  for ai, anim in ipairs(animations) do
+    local res_id = tostring(ai + 1)
+    lines[#lines + 1] = string.format('_data = {"%s": SubResource("%s")}', anim.name, res_id)
+  end
+
+  local content = table.concat(lines, "\n")
+
+  local f = io.open(output_path, "w")
+  if not f then
+    return base.error(-32603, "Failed to write file: " .. output_path)
+  end
+  f:write(content)
+  f:close()
+
+  return base.success({
+    output_path = output_path,
+    animations = anim_names,
+  })
+end
+
+-- 11. define_autotile_rules
+function advanced_cmds.define_autotile_rules(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local tile_size, e1 = base.require_number(params, "tile_size")
+  if e1 then return e1 end
+  local tile_type, e2 = base.require_string(params, "type")
+  if e2 then return e2 end
+
+  if tile_type ~= "blob47" and tile_type ~= "minimal16" and tile_type ~= "wang" then
+    return base.error_invalid_params("type must be 'blob47', 'minimal16', or 'wang'")
+  end
+
+  local cols = math.floor(sprite.width / tile_size)
+  local rows = math.floor(sprite.height / tile_size)
+  local tile_count = cols * rows
+
+  -- Build autotile metadata
+  local rules = {}
+  if tile_type == "blob47" then
+    -- Blob/marching squares 47-tile layout: each tile maps to a bitmask
+    for i = 0, math.min(tile_count, 47) - 1 do
+      rules[#rules + 1] = {
+        index = i,
+        col = i % cols,
+        row = math.floor(i / cols),
+        bitmask = i,
+      }
+    end
+  elseif tile_type == "minimal16" then
+    for i = 0, math.min(tile_count, 16) - 1 do
+      rules[#rules + 1] = {
+        index = i,
+        col = i % cols,
+        row = math.floor(i / cols),
+        bitmask = i,
+      }
+    end
+  elseif tile_type == "wang" then
+    for i = 0, math.min(tile_count, 16) - 1 do
+      rules[#rules + 1] = {
+        index = i,
+        col = i % cols,
+        row = math.floor(i / cols),
+        edge_mask = i,
+      }
+    end
+  end
+
+  -- Store as sprite user data (JSON in sprite.data)
+  local metadata = {
+    autotile_type = tile_type,
+    tile_size = tile_size,
+    columns = cols,
+    rows = rows,
+    tile_count = tile_count,
+    rules = rules,
+  }
+  local metadata_json = json.encode(metadata)
+
+  app.transaction("Define Autotile Rules", function()
+    sprite.data = metadata_json
+  end)
+
+  return base.success({
+    type = tile_type,
+    tile_count = tile_count,
+    tile_size = tile_size,
+  })
+end
+
+-- 12. set_lospec_palette
+function advanced_cmds.set_lospec_palette(params)
+  local sprite, err = base.get_sprite()
+  if err then return err end
+
+  local name, e1 = base.require_string(params, "name")
+  if e1 then return e1 end
+
+  local palettes = {
+    ["pico-8"] = {
+      "#000000", "#1D2B53", "#7E2553", "#008751",
+      "#AB5236", "#5F574F", "#C2C3C7", "#FFF1E8",
+      "#FF004D", "#FFA300", "#FFEC27", "#00E436",
+      "#29ADFF", "#83769C", "#FF77A8", "#FFCCAA",
+    },
+    ["endesga-32"] = {
+      "#BE4A2F", "#D77643", "#EAD4AA", "#E4A672",
+      "#B86F50", "#733E39", "#3E2731", "#A22633",
+      "#E43B44", "#F77622", "#FEAE34", "#FEE761",
+      "#63C74D", "#3E8948", "#265C42", "#193C3E",
+      "#124E89", "#0099DB", "#2CE8F5", "#FFFFFF",
+      "#C0CBDC", "#8B9BB4", "#5A6988", "#3A4466",
+      "#262B44", "#181425", "#FF0044", "#68386C",
+      "#B55088", "#F6757A", "#E8B796", "#C28569",
+    },
+    ["arne-16"] = {
+      "#000000", "#493C2B", "#BE2633", "#E06F8B",
+      "#9D9D9D", "#A46422", "#EB8931", "#F7E26B",
+      "#FFFFFF", "#1B2632", "#2F484E", "#44891A",
+      "#A3CE27", "#005784", "#31A2F2", "#B2DCEF",
+    },
+    ["sweetie-16"] = {
+      "#1A1C2C", "#5D275D", "#B13E53", "#EF7D57",
+      "#FFCD75", "#A7F070", "#38B764", "#257179",
+      "#29366F", "#3B5DC9", "#41A6F6", "#73EFF7",
+      "#F4F4F4", "#94B0C2", "#566C86", "#333C57",
+    },
+    ["resurrect-64"] = {
+      "#2E222F", "#3E3546", "#625565", "#966C6C",
+      "#AB947A", "#694F62", "#7F708A", "#9BABB2",
+      "#C7DCD0", "#FFFFFF", "#6E2727", "#B33831",
+      "#EA4F36", "#F57D4A", "#AE2334", "#E83B3B",
+      "#FB6B1D", "#F79617", "#F9C22B", "#7A3045",
+      "#9E4539", "#CD683D", "#E6904E", "#FBB954",
+      "#4C3E24", "#676633", "#A2A947", "#D5E04B",
+      "#FBFF86", "#165A4C", "#239063", "#1EBC73",
+      "#91DB69", "#CDDF6C", "#313638", "#374E4A",
+      "#547E64", "#92A984", "#B2BA90", "#0B5E65",
+      "#0B8A8F", "#0EAF9B", "#30E1B9", "#8FF8E2",
+      "#323353", "#484A77", "#4D65B4", "#4D9BE6",
+      "#8FD3FF", "#45293F", "#6B3E75", "#905EA9",
+      "#A884F3", "#EAADED", "#753C54", "#A24B6F",
+      "#CF657F", "#ED8099", "#831C5D", "#C32454",
+      "#F04F78", "#F68181", "#FCA790", "#FDCBB0",
+    },
+    ["apollo"] = {
+      "#172038", "#253A5E", "#3C5E8B", "#4F8FBA",
+      "#73BED3", "#A4DDDB", "#19332D", "#25562E",
+      "#468232", "#75A743", "#A8CA58", "#D0DA91",
+      "#4D2B32", "#7A4841", "#AD7757", "#C09473",
+      "#D7B594", "#E7D5B3", "#341C27", "#602C2C",
+      "#884B2B", "#BE772B", "#DE9E41", "#E8C170",
+      "#241527", "#411D31", "#752438", "#A53030",
+      "#CF573C", "#DA863E", "#1E1D39", "#402751",
+      "#7A367B", "#A23E8C", "#C65197", "#DF84A5",
+      "#090A14", "#10141F", "#151D28", "#202E37",
+      "#394A50", "#577277", "#819796", "#A8B5B2",
+      "#C7CFCC", "#EBEDE9",
+    },
+    ["island-joy-16"] = {
+      "#FFFFFF", "#6DF7C1", "#11ADC1", "#606C81",
+      "#1E8875", "#5BB361", "#A1E55A", "#F7E476",
+      "#F99252", "#CB4D68", "#6A3771", "#C92464",
+      "#F48CB6", "#F7B69E", "#9B9C82", "#393457",
+    },
+    ["slso8"] = {
+      "#0D2B45", "#203C56", "#544E68", "#8D697A",
+      "#D08159", "#FFAA5E", "#FFD4A3", "#FFECD6",
+    },
+    ["na16"] = {
+      "#8C8FAE", "#584563", "#3E2137", "#9A6348",
+      "#D79B7D", "#F5EDBA", "#C0C741", "#647D34",
+      "#E4943A", "#9D303B", "#D26471", "#70377F",
+      "#7EC4C1", "#34859D", "#17434B", "#1F0E1C",
+    },
+    ["crimson"] = {
+      "#1A1C2C", "#572956", "#B14156", "#EE7B58",
+      "#FFD079", "#A0F072", "#38B86E", "#276E7B",
+      "#29366F", "#405BD0", "#4FA4F7", "#86ECF8",
+      "#F4F4F4", "#93B6C1", "#557185", "#324056",
+    },
+  }
+
+  local pal_colors = palettes[name]
+  if not pal_colors then
+    local available = {}
+    for k, _ in pairs(palettes) do
+      available[#available + 1] = k
+    end
+    table.sort(available)
+    return base.error_invalid_params("Unknown palette: " .. name .. ". Available: " .. table.concat(available, ", "))
+  end
+
+  app.transaction("Set Lospec Palette: " .. name, function()
+    local pal = sprite.palettes[1]
+    pal:resize(#pal_colors)
+    for i = 1, #pal_colors do
+      pal:setColor(i - 1, color_util.from_hex(pal_colors[i]))
+    end
+  end)
+
+  return base.success({
+    name = name,
+    size = #pal_colors,
+    colors = pal_colors,
+  })
+end
+
+-- 13. copy_between_sprites
+function advanced_cmds.copy_between_sprites(params)
+  local src_filename, e1 = base.require_string(params, "source_filename")
+  if e1 then return e1 end
+  local tgt_filename, e2 = base.require_string(params, "target_filename")
+  if e2 then return e2 end
+  local src_layer_name, e3 = base.require_string(params, "source_layer")
+  if e3 then return e3 end
+  local tgt_layer_name = base.optional_string(params, "target_layer", nil)
+  local frame_num = base.optional_number(params, "frame", 1)
+
+  -- Find source and target sprites among open sprites
+  local src_sprite, tgt_sprite
+  for i = 1, #app.sprites do
+    local s = app.sprites[i]
+    local fn = app.fs.fileTitle(s.filename) .. "." .. app.fs.fileExtension(s.filename)
+    if s.filename == src_filename or fn == src_filename or app.fs.fileTitle(s.filename) == src_filename then
+      src_sprite = s
+    end
+    if s.filename == tgt_filename or fn == tgt_filename or app.fs.fileTitle(s.filename) == tgt_filename then
+      tgt_sprite = s
+    end
+  end
+
+  if not src_sprite then
+    return base.error(-32000, "Source sprite not found: " .. src_filename)
+  end
+  if not tgt_sprite then
+    return base.error(-32000, "Target sprite not found: " .. tgt_filename)
+  end
+
+  -- Find source layer
+  local src_layer = base.find_layer(src_sprite, src_layer_name)
+  if not src_layer then
+    return base.error_layer_not_found(src_layer_name)
+  end
+
+  if frame_num < 1 or frame_num > #src_sprite.frames then
+    return base.error_invalid_params("Frame out of range in source sprite")
+  end
+
+  local src_cel = src_layer:cel(frame_num)
+  if not src_cel then
+    return base.error(-32000, "No cel at source layer/frame")
+  end
+
+  -- Ensure target has enough frames
+  while #tgt_sprite.frames < frame_num do
+    tgt_sprite:newEmptyFrame()
+  end
+
+  local actual_tgt_layer_name = tgt_layer_name or src_layer_name
+
+  app.transaction("Copy Between Sprites", function()
+    -- Find or create target layer
+    local tgt_layer = base.find_layer(tgt_sprite, actual_tgt_layer_name)
+    if not tgt_layer then
+      app.sprite = tgt_sprite
+      tgt_layer = tgt_sprite:newLayer()
+      tgt_layer.name = actual_tgt_layer_name
+    end
+
+    -- Clone the image and place it
+    local img_clone = src_cel.image:clone()
+    tgt_sprite:newCel(tgt_layer, frame_num, img_clone, Point(src_cel.position.x, src_cel.position.y))
+  end)
+
+  return base.success({
+    source = src_filename,
+    target = tgt_filename,
+    layer = actual_tgt_layer_name,
+    frame = frame_num,
+  })
+end
+
+----------------------------------------------------------------------
 -- Register all commands into handlers table
 ----------------------------------------------------------------------
 local function load_commands()
@@ -4119,6 +5120,21 @@ local function load_commands()
   handlers["create_character_template"] = template_cmds.create_character_template
   handlers["create_tileset_template"] = template_cmds.create_tileset_template
 
+  -- Advanced commands
+  handlers["interpolate_frames"] = advanced_cmds.interpolate_frames
+  handlers["draw_symmetry"] = advanced_cmds.draw_symmetry
+  handlers["generate_color_ramp"] = advanced_cmds.generate_color_ramp
+  handlers["get_animation_preview"] = advanced_cmds.get_animation_preview
+  handlers["flip_sprite"] = advanced_cmds.flip_sprite
+  handlers["rotate_sprite"] = advanced_cmds.rotate_sprite
+  handlers["shift_cel"] = advanced_cmds.shift_cel
+  handlers["apply_dither"] = advanced_cmds.apply_dither
+  handlers["load_reference_image"] = advanced_cmds.load_reference_image
+  handlers["generate_animation_player_tres"] = advanced_cmds.generate_animation_player_tres
+  handlers["define_autotile_rules"] = advanced_cmds.define_autotile_rules
+  handlers["set_lospec_palette"] = advanced_cmds.set_lospec_palette
+  handlers["copy_between_sprites"] = advanced_cmds.copy_between_sprites
+
   local total = 0
   for _ in pairs(handlers) do total = total + 1 end
   print("[MCP] Total commands registered: " .. total)
@@ -4206,10 +5222,12 @@ end
 -- WebSocket connection
 ----------------------------------------------------------------------
 local function connect()
+  -- Destroy old connection completely
   if ws then
     pcall(function() ws:close() end)
     ws = nil
   end
+  connected = false
 
   local url = "ws://127.0.0.1:" .. port
   print("[MCP] Connecting to " .. url .. "...")
@@ -4217,55 +5235,47 @@ local function connect()
   ws = WebSocket {
     url = url,
     deflate = false,
-    minreconnectwait = 2,
-    maxreconnectwait = 5,
     onreceive = function(mt, data, err)
       if mt == WebSocketMessageType.OPEN then
         connected = true
         print("[MCP] Connected to MCP server")
-        if reconnect_timer then
-          reconnect_timer:stop()
-          reconnect_timer = nil
-        end
       elseif mt == WebSocketMessageType.TEXT then
         on_message(data)
       elseif mt == WebSocketMessageType.CLOSE then
         connected = false
         print("[MCP] Disconnected from MCP server")
-        start_reconnect()
+        -- Destroy ws so health check creates a fresh one
+        if ws then pcall(function() ws:close() end) end
+        ws = nil
       elseif mt == WebSocketMessageType.ERROR then
         connected = false
         print("[MCP] WebSocket error: " .. tostring(err))
-        start_reconnect()
+        if ws then pcall(function() ws:close() end) end
+        ws = nil
       end
     end
   }
   ws:connect()
-  print("[MCP] WebSocket connect() called")
 end
 
 ----------------------------------------------------------------------
--- Reconnection using Timer
+-- Persistent health check timer (always running)
+-- Checks every 3 seconds; if disconnected, attempts reconnect.
+-- This handles: server restart, network hiccups, initial connection.
 ----------------------------------------------------------------------
-function start_reconnect()
-  if reconnect_timer then return end
+local health_timer = nil
 
-  print("[MCP] Will attempt reconnection every " .. RECONNECT_INTERVAL_MS .. "ms")
-
-  reconnect_timer = Timer {
+local function start_health_check()
+  if health_timer then return end
+  health_timer = Timer {
     interval = RECONNECT_INTERVAL_MS / 1000.0,
     ontick = function()
       if not connected and not ws then
         connect()
-      elseif connected then
-        if reconnect_timer then
-          reconnect_timer:stop()
-          reconnect_timer = nil
-        end
       end
     end
   }
-  reconnect_timer:start()
+  health_timer:start()
 end
 
 ----------------------------------------------------------------------
@@ -4280,7 +5290,9 @@ function init(plugin)
 
   load_commands()
 
+  -- Initial connection + start persistent health check
   connect()
+  start_health_check()
 
   plugin:newCommand {
     id = "mcp_reconnect",
@@ -4333,9 +5345,9 @@ end
 
 function exit(plugin)
   print("[MCP] Aseprite MCP Pro shutting down...")
-  if reconnect_timer then
-    reconnect_timer:stop()
-    reconnect_timer = nil
+  if health_timer then
+    health_timer:stop()
+    health_timer = nil
   end
   if ws then
     pcall(function() ws:close() end)
