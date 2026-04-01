@@ -243,7 +243,7 @@ function M.get_sprite_screenshot(params)
   end
 
   -- Save flattened copy to temp file
-  local tmp_path = os.tmpname() .. ".png"
+  local tmp_path = app.fs.tempPath .. app.fs.pathSeparator .. "mcp_screenshot.png"
   local flat = Image(sprite.spec)
   flat:drawSprite(sprite, app.frame.frameNumber)
 
@@ -257,7 +257,7 @@ function M.get_sprite_screenshot(params)
   os.remove(tmp_path)
 
   -- Base64 encode
-  local b64 = require("utils.base64")
+  local b64 = _G.MCP_BASE64
   return base.success({
     image = b64.encode(data),
     width = sprite.width,

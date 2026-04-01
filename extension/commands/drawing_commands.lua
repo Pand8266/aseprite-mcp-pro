@@ -157,7 +157,7 @@ function M.get_image_data(params)
     })
   else
     -- base64_png
-    local tmp = os.tmpname() .. ".png"
+    local tmp = app.fs.tempPath .. app.fs.pathSeparator .. "mcp_tmp.png"
     cel.image:saveAs(tmp)
     local f = io.open(tmp, "rb")
     if not f then return base.error(-32603, "Failed to save image data") end
@@ -165,7 +165,7 @@ function M.get_image_data(params)
     f:close()
     os.remove(tmp)
 
-    local b64 = require("utils.base64")
+    local b64 = _G.MCP_BASE64
     return base.success({
       image = b64.encode(data),
       width = cel.image.width,
@@ -190,9 +190,9 @@ function M.set_image_data(params)
   if err4 then return err4 end
 
   if format == "base64_png" then
-    local b64 = require("utils.base64")
+    local b64 = _G.MCP_BASE64
     local decoded = b64.decode(data)
-    local tmp = os.tmpname() .. ".png"
+    local tmp = app.fs.tempPath .. app.fs.pathSeparator .. "mcp_tmp.png"
     local f = io.open(tmp, "wb")
     if not f then return base.error(-32603, "Failed to write temp file") end
     f:write(decoded)

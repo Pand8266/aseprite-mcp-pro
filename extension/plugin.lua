@@ -4,6 +4,52 @@
 -- JSON-RPC commands to Lua command handlers.
 ----------------------------------------------------------------------
 
+-- Set package.path to extension directory so require() finds our modules
+local script_path = debug.getinfo(1, "S").source:match("@?(.*[/\\])")
+if script_path then
+  package.path = script_path .. "?.lua;" .. script_path .. "?/init.lua;" .. package.path
+end
+
+-- Pre-load utils into global scope so commands can access them at runtime
+-- (Aseprite resets package.path between init and command execution)
+local _base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_G.MCP_BASE64 = {
+  encode = function(data)
+    return ((data:gsub(".", function(x)
+      local r, b2 = "", x:byte()
+      for i = 8, 1, -1 do
+        r = r .. (b2 % 2 ^ i - b2 % 2 ^ (i - 1) > 0 and "1" or "0")
+      end
+      return r
+    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
+      if #x < 6 then return "" end
+      local c = 0
+      for i = 1, 6 do
+        c = c + (x:sub(i, i) == "1" and 2 ^ (6 - i) or 0)
+      end
+      return _base64_chars:sub(c + 1, c + 1)
+    end) .. ({ "", "==", "=" })[#data % 3 + 1])
+  end,
+  decode = function(data)
+    data = string.gsub(data, "[^" .. _base64_chars .. "=]", "")
+    return (data:gsub(".", function(x)
+      if x == "=" then return "" end
+      local r, f = "", (_base64_chars:find(x) - 1)
+      for i = 6, 1, -1 do
+        r = r .. (f % 2 ^ i - f % 2 ^ (i - 1) > 0 and "1" or "0")
+      end
+      return r
+    end):gsub("%d%d%d?%d?%d?%d?%d?%d?", function(x)
+      if #x ~= 8 then return "" end
+      local c = 0
+      for i = 1, 8 do
+        c = c + (x:sub(i, i) == "1" and 2 ^ (8 - i) or 0)
+      end
+      return string.char(c)
+    end))
+  end,
+}
+
 -- Configuration
 local DEFAULT_PORT = 6515
 local RECONNECT_INTERVAL_MS = 3000

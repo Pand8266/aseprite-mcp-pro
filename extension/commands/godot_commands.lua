@@ -149,18 +149,44 @@ function M.export_for_godot(params)
     columns = SpriteSheetType.COLUMNS,
   }
 
-  -- Export sprite sheet
+  -- Export sprite sheet manually (app.command.ExportSpriteSheet shows UI dialog)
   local png_path = output_dir .. "/" .. name .. ".png"
   local json_path = output_dir .. "/" .. name .. ".json"
 
-  app.command.ExportSpriteSheet {
-    ui = false,
-    type = sheet_types[sheet_type_str] or SpriteSheetType.HORIZONTAL,
-    textureFilename = png_path,
-    dataFilename = json_path,
-    trim = trim,
-    scale = scale or 1,
-  }
+  local fw = sprite.width
+  local fh = sprite.height
+  local fc = #sprite.frames
+
+  -- Build horizontal sheet manually
+  local sheet_w, sheet_h
+  if sheet_type_str == "vertical" then
+    sheet_w = fw
+    sheet_h = fh * fc
+  else
+    sheet_w = fw * fc
+    sheet_h = fh
+  end
+
+  local sheet = Image(sheet_w, sheet_h, sprite.colorMode)
+  sheet:clear()
+  for i = 1, fc do
+    local frame_img = Image(sprite.spec)
+    frame_img:drawSprite(sprite, i)
+    local dx, dy
+    if sheet_type_str == "vertical" then
+      dx = 0
+      dy = (i - 1) * fh
+    else
+      dx = (i - 1) * fw
+      dy = 0
+    end
+    for y = 0, fh - 1 do
+      for x = 0, fw - 1 do
+        sheet:putPixel(dx + x, dy + y, frame_img:getPixel(x, y))
+      end
+    end
+  end
+  sheet:saveAs(png_path)
 
   -- Build animation data and generate .tres
   local anim_data = build_animation_data(sprite, sheet_type_str, nil)
